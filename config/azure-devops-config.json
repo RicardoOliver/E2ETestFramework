@@ -1,0 +1,168 @@
+{
+  "pipeline": {
+    "name": "E2E-Testing-Pipeline",
+    "description": "Pipeline CI/CD para E2E Testing Framework",
+    "repository": {
+      "type": "TfsGit",
+      "name": "E2ETestFramework"
+    },
+    "yamlFilename": "azure-pipelines.yml"
+  },
+  "environments": [
+    {
+      "name": "Development",
+      "description": "Ambiente de desenvolvimento para testes de feature branches",
+      "approvals": {
+        "required": false,
+        "approvers": []
+      },
+      "variables": {
+        "targetEnvironment": "Development",
+        "baseUrl": "https://the-internet.herokuapp.com",
+        "enableDebugLogs": "true",
+        "testParallelism": "2"
+      }
+    },
+    {
+      "name": "Staging",
+      "description": "Ambiente de staging para testes da branch develop",
+      "approvals": {
+        "required": true,
+        "approvers": ["tech-lead@company.com"]
+      },
+      "variables": {
+        "targetEnvironment": "Staging",
+        "baseUrl": "https://the-internet.herokuapp.com",
+        "enableDebugLogs": "false",
+        "testParallelism": "3"
+      }
+    },
+    {
+      "name": "Production",
+      "description": "Ambiente de produção para releases da branch main",
+      "approvals": {
+        "required": true,
+        "approvers": ["tech-lead@company.com", "product-owner@company.com"]
+      },
+      "variables": {
+        "targetEnvironment": "Production",
+        "baseUrl": "https://the-internet.herokuapp.com",
+        "enableDebugLogs": "false",
+        "testParallelism": "1"
+      }
+    }
+  ],
+  "variableGroups": [
+    {
+      "name": "Global-Variables",
+      "description": "Variáveis globais do pipeline",
+      "variables": {
+        "buildConfiguration": "Release",
+        "testProject": "E2ETestFramework.Tests",
+        "mainProject": "E2ETestFramework",
+        "testTimeout": "30",
+        "maxParallelTests": "3",
+        "majorVersion": "1",
+        "minorVersion": "0"
+      }
+    },
+    {
+      "name": "Notification-Variables",
+      "description": "Configurações de notificação",
+      "variables": {
+        "notificationChannel": "general",
+        "enableTeamsNotification": "true",
+        "enableSlackNotification": "false",
+        "enableEmailNotification": "true"
+      },
+      "secretVariables": ["teamsWebhookUrl", "slackWebhookUrl"]
+    }
+  ],
+  "serviceConnections": [
+    {
+      "name": "AzureServiceConnection",
+      "type": "AzureRM",
+      "description": "Conexão com Azure para deploy",
+      "configuration": {
+        "subscriptionId": "[SUBSCRIPTION_ID]",
+        "subscriptionName": "[SUBSCRIPTION_NAME]",
+        "resourceGroupName": "[RESOURCE_GROUP]",
+        "servicePrincipalId": "[SERVICE_PRINCIPAL_ID]"
+      }
+    }
+  ],
+  "branchPolicies": {
+    "main": {
+      "minimumReviewers": 2,
+      "requireLinkedWorkItems": true,
+      "requireCommentResolution": true,
+      "buildValidation": {
+        "enabled": true,
+        "pipelineName": "E2E-Testing-Pipeline",
+        "expiration": 12
+      }
+    },
+    "develop": {
+      "minimumReviewers": 1,
+      "requireLinkedWorkItems": false,
+      "requireCommentResolution": true,
+      "buildValidation": {
+        "enabled": true,
+        "pipelineName": "E2E-Testing-Pipeline",
+        "expiration": 6
+      }
+    }
+  },
+  "qualityGates": [
+    {
+      "name": "Test Pass Rate",
+      "metric": "testPassRate",
+      "threshold": 90,
+      "operator": "greaterThanOrEqual"
+    },
+    {
+      "name": "Code Coverage",
+      "metric": "codeCoverage",
+      "threshold": 80,
+      "operator": "greaterThanOrEqual"
+    },
+    {
+      "name": "Security Issues",
+      "metric": "securityIssues",
+      "threshold": 0,
+      "operator": "equal",
+      "severity": "high"
+    }
+  ],
+  "dashboards": [
+    {
+      "name": "E2E Testing Dashboard",
+      "widgets": [
+        {
+          "type": "TestResultsTrend",
+          "title": "Test Results Trend",
+          "configuration": {
+            "pipeline": "E2E-Testing-Pipeline",
+            "period": "30days"
+          }
+        },
+        {
+          "type": "BuildHistory",
+          "title": "Build History",
+          "configuration": {
+            "pipeline": "E2E-Testing-Pipeline",
+            "count": 20
+          }
+        },
+        {
+          "type": "DeploymentStatus",
+          "title": "Deployment Status",
+          "configuration": {
+            "environment": "Production",
+            "period": "7days"
+          }
+        }
+      ]
+    }
+  ]
+}

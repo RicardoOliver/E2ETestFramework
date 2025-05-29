@@ -1,0 +1,27 @@
+{
+  "language": {
+    "feature": "en-US"
+  },
+  "bindingCulture": {
+    "name": "en-US"
+  },
+  "runtime": {
+    "dependencies": [
+      {
+        "type": "registration",
+        "implementation": "E2ETestFramework.Tests.Hooks.TestHooks"
+      }
+    ]
+  },
+  "trace": {
+    "traceSuccessfulSteps": true,
+    "traceTimings": true,
+    "minTracedDuration": "0:0:0.1",
+    "stepDefinitionSkeletonStyle": "RegexAttribute"
+  },
+  "stepAssemblies": [
+    {
+      "assembly": "E2ETestFramework.Tests"
+    }
+  ]
+}

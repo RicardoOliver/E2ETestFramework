@@ -1,0 +1,73 @@
+# Template para notificações
+parameters:
+- name: webhookUrl
+  type: string
+  default: ''
+- name: channel
+  type: string
+  default: 'general'
+- name: notificationType
+  type: string
+  default: 'teams' # teams, slack, email
+
+steps:
+- task: PowerShell@2
+  displayName: '📢 Send ${{ parameters.notificationType }} Notification'
+  inputs:
+    targetType: 'inline'
+    script: |
+      $status = "$(Agent.JobStatus)"
+      $environment = "$(targetEnvironment)"
+      $buildVersion = "$(buildVersion)"
+      $buildUrl = "$(System.TeamFoundationCollectionUri)$(System.TeamProject)/_build/results?buildId=$(Build.BuildId)"
+      $sourceBranch = "$(Build.SourceBranch)".Replace("refs/heads/", "")
+      
+      $color = if ($status -eq "Succeeded") { "good" } else { "danger" }
+      $emoji = if ($status -eq "Succeeded") { "✅" } else { "❌" }
+      
+      if ("${{ parameters.notificationType }}" -eq "teams") {
+        # Microsoft Teams notification
+        $teamsMessage = @{
+          "@type" = "MessageCard"
+          "@context" = "http://schema.org/extensions"
+          "themeColor" = $color
+          "summary" = "Build $status"
+          "sections" = @(
+            @{
+              "activityTitle" = "$emoji E2E Test Framework - Build $status"
+              "activitySubtitle" = "Environment: $environment | Version: $buildVersion"
+              "facts" = @(
+                @{ "name" = "Environment"; "value" = $environment }
+                @{ "name" = "Version"; "value" = $buildVersion }
+                @{ "name" = "Branch"; "value" = $sourceBranch }
+                @{ "name" = "Status"; "value" = $status }
+              )
+              "markdown" = $true
+            }
+          )
+          "potentialAction" = @(
+            @{
+              "@type" = "OpenUri"
+              "name" = "View Build"
+              "targets" = @(
+                @{ "os" = "default"; "uri" = $buildUrl }
+              )
+            }
+          )
+        }
+        
+        $json = $teamsMessage | ConvertTo-Json -Depth 10
+        
+        if ("${{ parameters.webhookUrl }}" -ne "") {
+          try {
+            Invoke-RestMethod -Uri "${{ parameters.webhookUrl }}" -Method Post -Body $json -ContentType "application/json"
+            Write-Host "✅ Teams notification sent successfully"
+          } catch {
+            Write-Host "❌ Failed to send Teams notification: $($_.Exception.Message)"
+          }
+        } else {
+          Write-Host "⚠️ Teams webhook URL not configured"
+        }
+      }
+      
+      Write-Host "📢 Notification prepared for ${{ parameters.notificationType }}"

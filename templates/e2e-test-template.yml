@@ -1,0 +1,175 @@
+# Template para execução de testes E2E
+parameters:
+- name: testCategory
+  type: string
+  default: 'smoke'
+- name: testDisplayName
+  type: string
+  default: 'E2E Tests'
+- name: headlessMode
+  type: boolean
+  default: true
+- name: browser
+  type: string
+  default: 'Chrome'
+- name: maxParallel
+  type: number
+  default: 1
+- name: isPostDeploy
+  type: boolean
+  default: false
+
+steps:
+- checkout: none
+
+- task: DownloadBuildArtifacts@0
+  displayName: '📥 Download Test Artifacts'
+  inputs:
+    buildType: 'current'
+    downloadType: 'single'
+    artifactName: 'BuildArtifacts-$(buildVersion)'
+    downloadPath: '$(System.ArtifactsDirectory)'
+
+- task: UseDotNet@2
+  displayName: '📦 Install .NET 8.0'
+  inputs:
+    packageType: 'sdk'
+    version: '8.0.x'
+
+- task: PowerShell@2
+  displayName: '🌐 Install Browser Dependencies'
+  inputs:
+    targetType: 'inline'
+    script: |
+      Write-Host "🌐 Installing browser dependencies for ${{ parameters.browser }}..."
+      
+      if ("${{ parameters.browser }}" -eq "Chrome") {
+        # Chrome já está instalado no agente
+        Write-Host "✅ Chrome is available"
+      } elseif ("${{ parameters.browser }}" -eq "Firefox") {
+        # Instalar Firefox se necessário
+        Write-Host "🦊 Installing Firefox..."
+        choco install firefox -y --no-progress
+      } elseif ("${{ parameters.browser }}" -eq "Edge") {
+        # Edge já está instalado no Windows
+        Write-Host "✅ Edge is available"
+      }
+
+- task: PowerShell@2
+  displayName: '⚙️ Configure Test Environment'
+  inputs:
+    targetType: 'inline'
+    script: |
+      Write-Host "⚙️ Configuring test environment..."
+      
+      # Criar diretórios necessários
+      $testDir = "$(System.ArtifactsDirectory)/BuildArtifacts-$(buildVersion)/TestProject"
+      $reportsDir = "$testDir/Reports"
+      $screenshotsDir = "$testDir/Screenshots"
+      $logsDir = "$testDir/Logs"
+      
+      New-Item -ItemType Directory -Path $reportsDir -Force
+      New-Item -ItemType Directory -Path $screenshotsDir -Force
+      New-Item -ItemType Directory -Path $logsDir -Force
+      
+      Write-Host "📁 Test directories created"
+      Write-Host "   Reports: $reportsDir"
+      Write-Host "   Screenshots: $screenshotsDir"
+      Write-Host "   Logs: $logsDir"
+
+- task: DotNetCoreCLI@2
+  displayName: '🧪 Run ${{ parameters.testDisplayName }}'
+  inputs:
+    command: 'test'
+    projects: '$(System.ArtifactsDirectory)/BuildArtifacts-$(buildVersion)/TestProject/E2ETestFramework.Tests.dll'
+    arguments: >
+      --configuration $(buildConfiguration)
+      --logger trx
+      --logger "console;verbosity=normal"
+      --results-directory $(Agent.TempDirectory)/TestResults/${{ parameters.testCategory }}
+      --collect:"XPlat Code Coverage"
+      ${{ if ne(parameters.testCategory, 'all') }}:
+        --filter Category=${{ parameters.testCategory }}
+      -- RunConfiguration.MaxCpuCount=${{ parameters.maxParallel }}
+  env:
+    TestSettings__Browser: '${{ parameters.browser }}'
+    TestSettings__Headless: '${{ parameters.headlessMode }}'
+    TestSettings__Environment: '$(targetEnvironment)'
+    TestSettings__BaseUrl: '$(baseUrl)'
+    TestSettings__TimeoutSeconds: '$(testTimeout)'
+    TestSettings__ScreenshotOnFailure: 'true'
+    TestSettings__VideoRecording: 'false'
+    ${{ if parameters.isPostDeploy }}:
+      TestSettings__PostDeploy: 'true'
+  continueOnError: true
+  timeoutInMinutes: 30
+
+- task: PublishTestResults@2
+  displayName: '📊 Publish Test Results'
+  inputs:
+    testResultsFormat: 'VSTest'
+    testResultsFiles: '$(Agent.TempDirectory)/TestResults/${{ parameters.testCategory }}/**/*.trx'
+    mergeTestResults: true
+    failTaskOnFailedTests: false
+    testRunTitle: '${{ parameters.testDisplayName }} - ${{ parameters.browser }} - $(targetEnvironment)'
+    buildConfiguration: '$(buildConfiguration)'
+    buildPlatform: 'Any CPU'
+  condition: always()
+
+- task: PublishCodeCoverageResults@1
+  displayName: '📈 Publish Code Coverage'
+  inputs:
+    codeCoverageTool: 'Cobertura'
+    summaryFileLocation: '$(Agent.TempDirectory)/TestResults/${{ parameters.testCategory }}/**/coverage.cobertura.xml'
+    failIfCoverageEmpty: false
+  condition: always()
+
+- task: PowerShell@2
+  displayName: '📋 Collect Test Artifacts'
+  inputs:
+    targetType: 'inline'
+    script: |
+      Write-Host "📋 Collecting test artifacts..."
+      
+      $testDir = "$(System.ArtifactsDirectory)/BuildArtifacts-$(buildVersion)/TestProject"
+      $artifactDir = "$(Build.ArtifactStagingDirectory)/TestResults/${{ parameters.testCategory }}"
+      
+      New-Item -ItemType Directory -Path $artifactDir -Force
+      
+      # Copiar relatórios
+      if (Test-Path "$testDir/Reports") {
+        Copy-Item -Path "$testDir/Reports" -Destination "$artifactDir/Reports" -Recurse -Force
+        Write-Host "✅ Reports copied"
+      }
+      
+      # Copiar screenshots
+      if (Test-Path "$testDir/Screenshots") {
+        Copy-Item -Path "$testDir/Screenshots" -Destination "$artifactDir/Screenshots" -Recurse -Force
+        Write-Host "✅ Screenshots copied"
+      }
+      
+      # Copiar logs
+      if (Test-Path "$testDir/Logs") {
+        Copy-Item -Path "$testDir/Logs" -Destination "$artifactDir/Logs" -Recurse -Force
+        Write-Host "✅ Logs copied"
+      }
+      
+      # Criar resumo do teste
+      $summary = @{
+        testCategory = "${{ parameters.testCategory }}"
+        browser = "${{ parameters.browser }}"
+        environment = "$(targetEnvironment)"
+        timestamp = Get-Date -Format "yyyy-MM-ddTHH:mm:ssZ"
+        buildVersion = "$(buildVersion)"
+      }
+      
+      $summary | ConvertTo-Json | Out-File -FilePath "$artifactDir/test-summary.json"
+      Write-Host "📄 Test summary created"
+  condition: always()
+
+- task: PublishBuildArtifacts@1
+  displayName: '📤 Publish Test Artifacts'
+  inputs:
+    PathtoPublish: '$(Build.ArtifactStagingDirectory)/TestResults/${{ parameters.testCategory }}'
+    ArtifactName: 'TestResults-${{ parameters.testCategory }}-${{ parameters.browser }}-$(buildVersion)'
+  condition: always()

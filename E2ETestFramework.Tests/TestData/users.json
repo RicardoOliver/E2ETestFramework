@@ -1,0 +1,28 @@
+{
+  "validUser": {
+    "username": "tomsmith",
+    "password": "SuperSecretPassword!",
+    "firstName": "Tom",
+    "lastName": "Smith"
+  },
+  "invalidUser": {
+    "username": "invaliduser",
+    "password": "wrongpassword",
+    "firstName": "Invalid",
+    "lastName": "User"
+  },
+  "adminUser": {
+    "username": "admin",
+    "password": "admin123",
+    "firstName": "Admin",
+    "lastName": "User",
+    "role": "Administrator"
+  },
+  "lockedUser": {
+    "username": "locked@example.com",
+    "password": "LockedPassword123!",
+    "firstName": "Locked",
+    "lastName": "User",
+    "status": "Locked"
+  }
+}
