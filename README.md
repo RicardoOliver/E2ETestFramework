@@ -22,7 +22,7 @@ Framework avançado de testes end-to-end utilizando C# Selenium, Page Object Mod
 
 ## 📁 Estrutura do Projeto
 
-\`\`\`
+```
 E2ETestFramework/
 ├── 📂 Core/                           # Classes base e utilitários core
 │   ├── 🔧 DriverFactory.cs            # Gerenciamento avançado de WebDriver
@@ -59,7 +59,7 @@ Pipeline & Scripts/
 ├── 📂 config/                         # Configurações
 │   └── ⚙️ azure-devops-config.json    # Configuração do Azure DevOps
 └── 🚀 azure-pipelines.yml             # Pipeline principal CI/CD
-\`\`\`
+```
 
 ## 🛠️ Pré-requisitos
 
