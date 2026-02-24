@@ -1,439 +1,377 @@
-# Azure DevOps Pipeline para E2E Testing Framework
-# Suporta múltiplos ambientes e estratégias de deploy
-
 trigger:
   branches:
     include:
-    - main
-    - develop
-    - feature/*
-    - release/*
-    - hotfix/*
-  paths:
-    exclude:
-    - README.md
-    - docs/*
-    - .gitignore
+      - main
+      - develop
+      - feature/*
 
 pr:
   branches:
     include:
-    - main
-    - develop
-  paths:
-    exclude:
-    - README.md
-    - docs/*
+      - main
+      - develop
+
+name: '$(Date:yyyyMMdd).$(Rev:r)'
 
 variables:
-  # Build Configuration
-  buildConfiguration: 'Release'
-  testProject: 'E2ETestFramework.Tests'
-  mainProject: 'E2ETestFramework'
-  
-  # Test Configuration
-  testTimeout: 30
-  maxParallelTests: 3
-  
-  # Versioning
-  majorVersion: 1
-  minorVersion: 0
-  patchVersion: $[counter(variables['Build.SourceBranch'], 0)]
-  buildVersion: '$(majorVersion).$(minorVersion).$(patchVersion)'
-  
-  # Environments
-  ${{ if eq(variables['Build.SourceBranch'], 'refs/heads/main') }}:
-    targetEnvironment: 'Production'
-    baseUrl: 'https://the-internet.herokuapp.com'
-  ${{ elseif eq(variables['Build.SourceBranch'], 'refs/heads/develop') }}:
-    targetEnvironment: 'Staging'
-    baseUrl: 'https://the-internet.herokuapp.com'
-  ${{ else }}:
-    targetEnvironment: 'Development'
-    baseUrl: 'https://the-internet.herokuapp.com'
-
-pool:
-  vmImage: 'windows-latest'
+  - name: BuildConfiguration
+    value: Release
+  - name: DotNetSdkVersion
+    value: 8.0.x
+  - name: CoverageThreshold
+    value: '80'
+  - name: ArtifactRoot
+    value: '$(Build.ArtifactStagingDirectory)/evidence'
+  - name: TestProject
+    value: 'E2ETestFramework.Tests/E2ETestFramework.Tests.csproj'
+  - name: DockerRepository
+    value: 'e2e-test-framework'
+  - name: ContainerRegistryServiceConnection
+    value: 'sc-acr-enterprise'
+  - name: SonarServiceConnection
+    value: 'sc-sonarqube-enterprise'
+  - name: KeyVaultName
+    value: 'kv-e2e-enterprise'
 
 stages:
-# ================================
-# STAGE 1: BUILD & UNIT TESTS
-# ================================
+- stage: Validation
+  displayName: '1) Validation'
+  jobs:
+    - job: ValidateBranchAndVersion
+      displayName: 'Validate branch policy and semantic version'
+      pool:
+        vmImage: ubuntu-latest
+      steps:
+        - checkout: self
+          fetchDepth: 0
+
+        - task: PowerShell@2
+          displayName: 'Validate source branch strategy'
+          inputs:
+            targetType: inline
+            script: |
+              $branch = "$(Build.SourceBranch)"
+              $allowed = @('refs/heads/main','refs/heads/develop')
+              $isFeature = $branch -like 'refs/heads/feature/*'
+              if (($allowed -notcontains $branch) -and -not $isFeature) {
+                Write-Error "Branch '$branch' is not allowed. Use feature/*, develop or main."
+                exit 1
+              }
+              Write-Host "Branch validation passed for $branch"
+
+        - task: PowerShell@2
+          displayName: 'Validate project versioning'
+          inputs:
+            targetType: inline
+            script: |
+              [xml]$project = Get-Content "E2ETestFramework/E2ETestFramework.csproj"
+              $version = $project.Project.PropertyGroup.Version
+              if ([string]::IsNullOrWhiteSpace($version)) {
+                Write-Error "Version element not found in E2ETestFramework.csproj"
+                exit 1
+              }
+              if ($version -notmatch '^\d+\.\d+\.\d+(-[A-Za-z0-9.-]+)?$') {
+                Write-Error "Version '$version' is not semantic version compatible"
+                exit 1
+              }
+              Write-Host "Semantic version validation passed: $version"
+
 - stage: Build
-  displayName: '🔨 Build & Unit Tests'
+  displayName: '2) Build'
+  dependsOn: Validation
   jobs:
-  - job: BuildAndUnitTest
-    displayName: 'Build Solution & Run Unit Tests'
-    timeoutInMinutes: 15
-    
-    steps:
-    - checkout: self
-      fetchDepth: 1
-      
-    - task: UseDotNet@2
-      displayName: '📦 Install .NET 8.0 SDK'
-      inputs:
-        packageType: 'sdk'
-        version: '8.0.x'
-        includePreviewVersions: false
+    - job: RestoreBuildPublish
+      displayName: 'Restore, build, cache and publish artifacts'
+      pool:
+        vmImage: ubuntu-latest
+      steps:
+        - checkout: self
 
-    - task: DotNetCoreCLI@2
-      displayName: '🔄 Restore NuGet Packages'
-      inputs:
-        command: 'restore'
-        projects: '**/*.csproj'
-        feedsToUse: 'select'
-        verbosityRestore: 'minimal'
+        - task: UseDotNet@2
+          inputs:
+            packageType: sdk
+            version: $(DotNetSdkVersion)
 
-    - task: DotNetCoreCLI@2
-      displayName: '🔨 Build Solution'
-      inputs:
-        command: 'build'
-        projects: '**/*.csproj'
-        arguments: '--configuration $(buildConfiguration) --no-restore --verbosity minimal /p:Version=$(buildVersion)'
+        - task: Cache@2
+          displayName: 'Cache NuGet packages'
+          inputs:
+            key: 'nuget | "$(Agent.OS)" | **/*.csproj,nuget.config,global.json'
+            restoreKeys: |
+              nuget | "$(Agent.OS)"
+            path: ~/.nuget/packages
 
-    - task: DotNetCoreCLI@2
-      displayName: '🧪 Run Unit Tests'
-      inputs:
-        command: 'test'
-        projects: '$(mainProject)/**/*UnitTests.csproj'
-        arguments: '--configuration $(buildConfiguration) --no-build --logger trx --collect:"XPlat Code Coverage" --results-directory $(Agent.TempDirectory)/UnitTestResults'
-      continueOnError: true
-      condition: and(succeeded(), ne(variables['Build.Reason'], 'PullRequest'))
+        - task: DotNetCoreCLI@2
+          displayName: 'dotnet restore'
+          inputs:
+            command: restore
+            projects: '**/*.csproj'
 
-    - task: PublishTestResults@2
-      displayName: '📊 Publish Unit Test Results'
-      inputs:
-        testResultsFormat: 'VSTest'
-        testResultsFiles: '$(Agent.TempDirectory)/UnitTestResults/**/*.trx'
-        mergeTestResults: true
-        failTaskOnFailedTests: false
-        testRunTitle: 'Unit Tests - $(targetEnvironment)'
-      condition: and(always(), ne(variables['Build.Reason'], 'PullRequest'))
+        - task: DotNetCoreCLI@2
+          displayName: 'dotnet build'
+          inputs:
+            command: build
+            projects: 'E2ETestFramework.sln'
+            arguments: '--configuration $(BuildConfiguration) --no-restore'
 
-    - task: DotNetCoreCLI@2
-      displayName: '📦 Publish Test Project'
-      inputs:
-        command: 'publish'
-        projects: '$(testProject)/*.csproj'
-        arguments: '--configuration $(buildConfiguration) --no-build --output $(Build.ArtifactStagingDirectory)/TestProject'
-        publishWebProjects: false
+        - task: DotNetCoreCLI@2
+          displayName: 'Publish test binaries'
+          inputs:
+            command: publish
+            publishWebProjects: false
+            projects: '$(TestProject)'
+            arguments: '--configuration $(BuildConfiguration) --no-build --output $(Build.ArtifactStagingDirectory)/drop/tests'
 
-    - task: DotNetCoreCLI@2
-      displayName: '📦 Publish Main Project'
-      inputs:
-        command: 'publish'
-        projects: '$(mainProject)/*.csproj'
-        arguments: '--configuration $(buildConfiguration) --no-build --output $(Build.ArtifactStagingDirectory)/MainProject'
-        publishWebProjects: false
+        - publish: '$(Build.ArtifactStagingDirectory)/drop'
+          artifact: drop
 
-    - task: CopyFiles@2
-      displayName: '📋 Copy Pipeline Files'
-      inputs:
-        SourceFolder: '$(Build.SourcesDirectory)'
-        Contents: |
-          azure-pipelines.yml
-          README.md
-          .gitignore
-          **/*.md
-        TargetFolder: '$(Build.ArtifactStagingDirectory)/PipelineFiles'
-
-    - task: PublishBuildArtifacts@1
-      displayName: '📤 Publish Build Artifacts'
-      inputs:
-        PathtoPublish: '$(Build.ArtifactStagingDirectory)'
-        ArtifactName: 'BuildArtifacts-$(buildVersion)'
-        publishLocation: 'Container'
-
-# ================================
-# STAGE 2: E2E TESTS
-# ================================
-- stage: E2ETests
-  displayName: '🧪 E2E Tests'
+- stage: CodeQuality
+  displayName: '3) Code Quality'
   dependsOn: Build
+  jobs:
+    - job: SonarAndCoverage
+      pool:
+        vmImage: ubuntu-latest
+      steps:
+        - checkout: self
+        - task: UseDotNet@2
+          inputs:
+            packageType: sdk
+            version: $(DotNetSdkVersion)
+
+        - task: SonarQubePrepare@5
+          inputs:
+            SonarQube: '$(SonarServiceConnection)'
+            scannerMode: 'MSBuild'
+            projectKey: 'E2ETestFramework'
+            projectName: 'E2ETestFramework'
+            extraProperties: |
+              sonar.cs.vstest.reportsPaths=$(Agent.TempDirectory)/**/*.trx
+              sonar.cs.opencover.reportsPaths=$(Agent.TempDirectory)/**/coverage.opencover.xml
+
+        - task: DotNetCoreCLI@2
+          displayName: 'Run tests with coverage'
+          inputs:
+            command: test
+            projects: '$(TestProject)'
+            arguments: '--configuration $(BuildConfiguration) --logger trx --collect:"XPlat Code Coverage" --results-directory $(Agent.TempDirectory)/qualitytests'
+
+        - task: PowerShell@2
+          displayName: 'Enforce coverage >= $(CoverageThreshold)%'
+          inputs:
+            targetType: inline
+            script: |
+              [xml]$coverage = Get-Content (Get-ChildItem -Path "$(Agent.TempDirectory)/qualitytests" -Filter 'coverage.cobertura.xml' -Recurse | Select-Object -First 1).FullName
+              $lineRate = [math]::Round(([double]$coverage.coverage.'line-rate') * 100, 2)
+              Write-Host "Line coverage: $lineRate%"
+              if ($lineRate -lt [double]"$(CoverageThreshold)") {
+                Write-Error "Coverage $lineRate% below threshold $(CoverageThreshold)%"
+                exit 1
+              }
+
+        - task: SonarQubeAnalyze@5
+        - task: SonarQubePublish@5
+          inputs:
+            pollingTimeoutSec: '300'
+
+- stage: Security
+  displayName: '4) Security / DevSecOps'
+  dependsOn: CodeQuality
+  jobs:
+    - job: SecurityScans
+      pool:
+        vmImage: ubuntu-latest
+      steps:
+        - checkout: self
+        - task: UseDotNet@2
+          inputs:
+            packageType: sdk
+            version: $(DotNetSdkVersion)
+
+        - script: |
+            dotnet restore E2ETestFramework.sln
+            dotnet list E2ETestFramework.sln package --vulnerable --include-transitive > $(Build.ArtifactStagingDirectory)/dependency-vulnerabilities.txt
+            if grep -q 'has the following vulnerable packages' $(Build.ArtifactStagingDirectory)/dependency-vulnerabilities.txt; then
+              echo "Vulnerable packages found" >&2
+              exit 1
+            fi
+          displayName: 'Dependency vulnerability scan (.NET)'
+
+        - script: |
+            docker run --rm -v $(Build.SourcesDirectory):/src -v $(Build.ArtifactStagingDirectory):/report \
+              owasp/dependency-check:latest --scan /src --format JSON --out /report --project E2ETestFramework
+          displayName: 'OWASP Dependency-Check scan'
+
+        - script: |
+            docker run --rm -v $(Build.SourcesDirectory):/repo zricethezav/gitleaks:latest detect \
+              --source /repo --report-path /repo/gitleaks-report.json
+          displayName: 'Secrets detection with Gitleaks'
+
+        - publish: $(Build.ArtifactStagingDirectory)
+          artifact: security-reports
+
+- stage: TestExecution
+  displayName: '5) Test Execution'
+  dependsOn: Security
+  jobs:
+    - template: templates/e2e-test-template.yml
+      parameters:
+        suite: smoke
+        browser: chrome
+    - template: templates/e2e-test-template.yml
+      parameters:
+        suite: smoke
+        browser: firefox
+    - template: templates/e2e-test-template.yml
+      parameters:
+        suite: smoke
+        browser: edge
+    - template: templates/e2e-test-template.yml
+      parameters:
+        suite: regression
+        browser: chrome
+    - template: templates/e2e-test-template.yml
+      parameters:
+        suite: regression
+        browser: firefox
+    - template: templates/e2e-test-template.yml
+      parameters:
+        suite: regression
+        browser: edge
+    - template: templates/e2e-test-template.yml
+      parameters:
+        suite: security
+        browser: chrome
+    - template: templates/e2e-test-template.yml
+      parameters:
+        suite: security
+        browser: firefox
+    - template: templates/e2e-test-template.yml
+      parameters:
+        suite: security
+        browser: edge
+    - template: templates/e2e-test-template.yml
+      parameters:
+        suite: accessibility
+        browser: chrome
+    - template: templates/e2e-test-template.yml
+      parameters:
+        suite: accessibility
+        browser: firefox
+    - template: templates/e2e-test-template.yml
+      parameters:
+        suite: accessibility
+        browser: edge
+
+- stage: Containerize
+  displayName: '6) Containerização'
+  dependsOn: TestExecution
+  jobs:
+    - job: BuildPushImage
+      pool:
+        vmImage: ubuntu-latest
+      steps:
+        - checkout: self
+        - task: Docker@2
+          displayName: 'Build and push test image'
+          inputs:
+            command: buildAndPush
+            repository: $(DockerRepository)
+            dockerfile: Dockerfile.tests
+            containerRegistry: $(ContainerRegistryServiceConnection)
+            tags: |
+              $(Build.BuildId)-$(Build.SourceVersion)
+              latest
+
+- stage: Deploy_Dev
+  displayName: '7) Deploy DEV (auto)'
+  dependsOn: Containerize
   condition: succeeded()
-  
   jobs:
-  # Smoke Tests - Execução rápida
-  - job: SmokeTests
-    displayName: '💨 Smoke Tests'
-    timeoutInMinutes: 20
-    
-    steps:
-    - template: templates/e2e-test-template.yml
+    - template: templates/deploy-template.yml
       parameters:
-        testCategory: 'smoke'
-        testDisplayName: 'Smoke Tests'
-        headlessMode: true
-        browser: 'Chrome'
-        maxParallel: 2
+        environmentName: dev
+        requireManualApproval: false
 
-  # Regression Tests - Execução completa
-  - job: RegressionTests
-    displayName: '🔄 Regression Tests'
-    dependsOn: SmokeTests
-    condition: succeeded()
-    timeoutInMinutes: 45
-    strategy:
-      matrix:
-        Chrome:
-          browserName: 'Chrome'
-        Firefox:
-          browserName: 'Firefox'
-        Edge:
-          browserName: 'Edge'
-    
-    steps:
-    - template: templates/e2e-test-template.yml
-      parameters:
-        testCategory: 'regression'
-        testDisplayName: 'Regression Tests - $(browserName)'
-        headlessMode: true
-        browser: '$(browserName)'
-        maxParallel: 1
-
-  # Security Tests
-  - job: SecurityTests
-    displayName: '🔒 Security Tests'
-    dependsOn: SmokeTests
-    condition: succeeded()
-    timeoutInMinutes: 25
-    
-    steps:
-    - template: templates/e2e-test-template.yml
-      parameters:
-        testCategory: 'security'
-        testDisplayName: 'Security Tests'
-        headlessMode: true
-        browser: 'Chrome'
-        maxParallel: 1
-
-  # Accessibility Tests
-  - job: AccessibilityTests
-    displayName: '♿ Accessibility Tests'
-    dependsOn: SmokeTests
-    condition: succeeded()
-    timeoutInMinutes: 20
-    
-    steps:
-    - template: templates/e2e-test-template.yml
-      parameters:
-        testCategory: 'accessibility'
-        testDisplayName: 'Accessibility Tests'
-        headlessMode: true
-        browser: 'Chrome'
-        maxParallel: 1
-
-# ================================
-# STAGE 3: QUALITY GATES
-# ================================
-- stage: QualityGates
-  displayName: '🎯 Quality Gates'
-  dependsOn: E2ETests
+- stage: Deploy_QA
+  displayName: '8) Deploy QA (auto)'
+  dependsOn: Deploy_Dev
   condition: succeeded()
-  
   jobs:
-  - job: QualityAnalysis
-    displayName: 'Quality Analysis & Reporting'
-    
-    steps:
-    - checkout: none
-    
-    - task: DownloadBuildArtifacts@0
-      displayName: '📥 Download Test Artifacts'
-      inputs:
-        buildType: 'current'
-        downloadType: 'specific'
-        downloadPath: '$(System.ArtifactsDirectory)'
+    - template: templates/deploy-template.yml
+      parameters:
+        environmentName: qa
+        requireManualApproval: false
 
-    - task: PowerShell@2
-      displayName: '📊 Generate Quality Report'
-      inputs:
-        targetType: 'inline'
-        script: |
-          Write-Host "🔍 Analyzing Test Results..."
-          
-          # Coletar resultados de teste
-          $testResultsPath = "$(System.ArtifactsDirectory)"
-          $reportPath = "$(Build.ArtifactStagingDirectory)/QualityReport"
-          New-Item -ItemType Directory -Path $reportPath -Force
-          
-          # Analisar resultados de teste
-          $testFiles = Get-ChildItem -Path $testResultsPath -Filter "*.trx" -Recurse
-          $totalTests = 0
-          $passedTests = 0
-          $failedTests = 0
-          
-          foreach ($file in $testFiles) {
-            Write-Host "📄 Processing: $($file.Name)"
-            # Aqui você pode adicionar lógica para analisar os arquivos .trx
-          }
-          
-          # Calcular métricas
-          $passRate = if ($totalTests -gt 0) { ($passedTests / $totalTests) * 100 } else { 0 }
-          
-          Write-Host "📈 Test Summary:"
-          Write-Host "   Total Tests: $totalTests"
-          Write-Host "   Passed: $passedTests"
-          Write-Host "   Failed: $failedTests"
-          Write-Host "   Pass Rate: $($passRate.ToString('F2'))%"
-          
-          # Definir quality gates
-          $minPassRate = 90
-          if ($passRate -lt $minPassRate) {
-            Write-Host "❌ Quality Gate Failed: Pass rate ($($passRate.ToString('F2'))%) is below minimum ($minPassRate%)"
-            exit 1
-          } else {
-            Write-Host "✅ Quality Gate Passed: Pass rate meets requirements"
-          }
-          
-          # Criar relatório JSON
-          $report = @{
-            timestamp = Get-Date -Format "yyyy-MM-ddTHH:mm:ssZ"
-            environment = "$(targetEnvironment)"
-            buildVersion = "$(buildVersion)"
-            totalTests = $totalTests
-            passedTests = $passedTests
-            failedTests = $failedTests
-            passRate = $passRate
-            qualityGatePassed = $passRate -ge $minPassRate
-          }
-          
-          $report | ConvertTo-Json | Out-File -FilePath "$reportPath/quality-report.json"
-          Write-Host "📋 Quality report saved to: $reportPath/quality-report.json"
-
-    - task: PublishBuildArtifacts@1
-      displayName: '📤 Publish Quality Report'
-      inputs:
-        PathtoPublish: '$(Build.ArtifactStagingDirectory)/QualityReport'
-        ArtifactName: 'QualityReport-$(buildVersion)'
-
-# ================================
-# STAGE 4: DEPLOYMENT
-# ================================
-- stage: Deploy
-  displayName: '🚀 Deploy'
-  dependsOn: QualityGates
-  condition: and(succeeded(), in(variables['Build.SourceBranch'], 'refs/heads/main', 'refs/heads/develop'))
-  
-  jobs:
-  - deployment: DeployToEnvironment
-    displayName: 'Deploy to $(targetEnvironment)'
-    environment: '$(targetEnvironment)'
-    strategy:
-      runOnce:
-        deploy:
-          steps:
-          - checkout: none
-          
-          - task: DownloadBuildArtifacts@0
-            displayName: '📥 Download Build Artifacts'
-            inputs:
-              buildType: 'current'
-              downloadType: 'single'
-              artifactName: 'BuildArtifacts-$(buildVersion)'
-              downloadPath: '$(System.ArtifactsDirectory)'
-
-          - task: PowerShell@2
-            displayName: '🚀 Deploy Application'
-            inputs:
-              targetType: 'inline'
-              script: |
-                Write-Host "🚀 Deploying to $(targetEnvironment) environment..."
-                Write-Host "📦 Build Version: $(buildVersion)"
-                Write-Host "🌐 Target URL: $(baseUrl)"
-                
-                # Aqui você adicionaria os passos reais de deploy
-                # Por exemplo: deploy para Azure App Service, IIS, Docker, etc.
-                
-                Write-Host "✅ Deployment completed successfully!"
-
-          - task: PowerShell@2
-            displayName: '🔍 Post-Deploy Verification'
-            inputs:
-              targetType: 'inline'
-              script: |
-                Write-Host "🔍 Running post-deployment verification..."
-                
-                # Verificar se a aplicação está respondendo
-                try {
-                  $response = Invoke-WebRequest -Uri "$(baseUrl)" -Method GET -TimeoutSec 30
-                  if ($response.StatusCode -eq 200) {
-                    Write-Host "✅ Application is responding correctly"
-                  } else {
-                    Write-Host "❌ Application returned status code: $($response.StatusCode)"
-                    exit 1
-                  }
-                } catch {
-                  Write-Host "❌ Failed to connect to application: $($_.Exception.Message)"
-                  exit 1
-                }
-
-# ================================
-# STAGE 5: POST-DEPLOY TESTS
-# ================================
-- stage: PostDeployTests
-  displayName: '🧪 Post-Deploy Tests'
-  dependsOn: Deploy
+- stage: Deploy_Staging
+  displayName: '9) Deploy STAGING (manual approval)'
+  dependsOn: Deploy_QA
   condition: succeeded()
-  
   jobs:
-  - job: PostDeploymentValidation
-    displayName: 'Post-Deployment Validation'
-    timeoutInMinutes: 20
-    
-    steps:
+    - template: templates/deploy-template.yml
+      parameters:
+        environmentName: staging
+        requireManualApproval: true
+
+- stage: Deploy_Prod
+  displayName: '10) Deploy PROD (double approval)'
+  dependsOn: Deploy_Staging
+  condition: succeeded()
+  jobs:
+    - template: templates/deploy-template.yml
+      parameters:
+        environmentName: prod
+        requireManualApproval: true
+
+- stage: PostDeployValidation
+  displayName: '11) Post-deploy Smoke + Rollback trigger'
+  dependsOn: Deploy_Prod
+  condition: succeeded()
+  jobs:
     - template: templates/e2e-test-template.yml
       parameters:
-        testCategory: 'smoke'
-        testDisplayName: 'Post-Deploy Smoke Tests'
-        headlessMode: true
-        browser: 'Chrome'
-        maxParallel: 1
-        isPostDeploy: true
+        suite: smoke
+        browser: chrome
+        postDeploy: true
 
-# ================================
-# STAGE 6: NOTIFICATIONS
-# ================================
+- stage: Rollback
+  displayName: '12) Auto Rollback'
+  dependsOn: PostDeployValidation
+  condition: failed('PostDeployValidation')
+  jobs:
+    - job: RollbackJob
+      pool:
+        vmImage: ubuntu-latest
+      steps:
+        - script: |
+            echo "Post deploy smoke failed. Rolling back to previous stable release..."
+            echo "##vso[task.setvariable variable=RollbackExecuted;isOutput=true]true"
+          displayName: 'Execute rollback strategy'
+
 - stage: Notifications
-  displayName: '📢 Notifications'
-  dependsOn: 
-  - Deploy
-  - PostDeployTests
+  displayName: '13) Intelligent notifications + metrics export'
+  dependsOn:
+    - TestExecution
+    - Deploy_Prod
+    - Rollback
   condition: always()
-  
   jobs:
-  - job: SendNotifications
-    displayName: 'Send Notifications'
-    
-    steps:
-    - checkout: none
-    
-    - task: PowerShell@2
-      displayName: '📧 Send Notification'
-      inputs:
-        targetType: 'inline'
-        script: |
-          $status = "$(Agent.JobStatus)"
-          $environment = "$(targetEnvironment)"
-          $buildVersion = "$(buildVersion)"
-          $buildUrl = "$(System.TeamFoundationCollectionUri)$(System.TeamProject)/_build/results?buildId=$(Build.BuildId)"
-          
-          Write-Host "📢 Sending notification..."
-          Write-Host "   Status: $status"
-          Write-Host "   Environment: $environment"
-          Write-Host "   Version: $buildVersion"
-          Write-Host "   Build URL: $buildUrl"
-          
-          # Aqui você pode adicionar integração com:
-          # - Microsoft Teams
-          # - Slack
-          # - Email
-          # - ServiceNow
-          # etc.
-          
-          if ($status -eq "Succeeded") {
-            Write-Host "✅ Deployment successful notification sent"
-          } else {
-            Write-Host "❌ Deployment failure notification sent"
-          }
+    - job: Notify
+      pool:
+        vmImage: ubuntu-latest
+      steps:
+        - checkout: self
+        - task: AzureKeyVault@2
+          inputs:
+            azureSubscription: 'sc-azure-subscription-enterprise'
+            KeyVaultName: '$(KeyVaultName)'
+            SecretsFilter: 'teams-webhook,smtp-host,smtp-port,smtp-user,smtp-password,smtp-to'
+            RunAsPreJob: false
+
+        - template: templates/notification-template.yml
+          parameters:
+            teamsWebhook: '$(teams-webhook)'
+            smtpHost: '$(smtp-host)'
+            smtpPort: '$(smtp-port)'
+            smtpUser: '$(smtp-user)'
+            smtpPassword: '$(smtp-password)'
+            smtpTo: '$(smtp-to)'

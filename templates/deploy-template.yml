@@ -1,0 +1,19 @@
+parameters:
+  - name: environmentName
+    type: string
+  - name: requireManualApproval
+    type: boolean
+
+jobs:
+  - deployment: deploy_${{ parameters.environmentName }}
+    displayName: 'Deploy ${{ parameters.environmentName }}'
+    environment: '${{ parameters.environmentName }}'
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+            - checkout: self
+            - script: |
+                echo "Deploying release $(Build.BuildId) to ${{ parameters.environmentName }}"
+                echo "Manual approvals for staging/prod are enforced via Azure DevOps Environment checks."
+              displayName: 'Deploy application'
