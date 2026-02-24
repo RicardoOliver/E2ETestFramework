@@ -86,12 +86,15 @@ jobs:
           RATE=$(python -c "import xml.etree.ElementTree as ET; import os; f=os.environ['FILE']; root=ET.parse(f).getroot(); print(round(float(root.attrib['line-rate'])*100,2))")
           echo "Coverage: $RATE%"
           awk -v r="$RATE" -v t="$COVERAGE_THRESHOLD" 'BEGIN { if (r < t) exit 1 }'
-      - name: SonarQube Scan
-        if: ${{ secrets.SONAR_TOKEN != '' && secrets.SONAR_HOST_URL != '' }}
+      - name: SonarQube Scan (optional)
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
           SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
         run: |
+          if [[ -z "$SONAR_TOKEN" || -z "$SONAR_HOST_URL" ]]; then
+            echo "SONAR_TOKEN/SONAR_HOST_URL not configured; skipping SonarQube scan."
+            exit 0
+          fi
           dotnet tool update --global dotnet-sonarscanner
           export PATH="$PATH:$HOME/.dotnet/tools"
           dotnet sonarscanner begin /k:"E2ETestFramework" /d:sonar.host.url="$SONAR_HOST_URL" /d:sonar.token="$SONAR_TOKEN" /d:sonar.cs.opencover.reportsPaths="artifacts/quality/**/coverage.opencover.xml"
@@ -189,9 +192,14 @@ jobs:
     if: always()
     runs-on: ubuntu-latest
     steps:
-      - name: Teams webhook notification
-        if: ${{ secrets.TEAMS_WEBHOOK_URL != '' }}
+      - name: Teams webhook notification (optional)
         shell: bash
+        env:
+          TEAMS_WEBHOOK_URL: ${{ secrets.TEAMS_WEBHOOK_URL }}
         run: |
+          if [[ -z "$TEAMS_WEBHOOK_URL" ]]; then
+            echo "TEAMS_WEBHOOK_URL not configured; skipping Teams notification."
+            exit 0
+          fi
           STATUS="${{ job.status }}"
-          curl -H 'Content-Type: application/json' -d "{\"text\":\"E2E workflow ${STATUS} - run ${{ github.run_id }}\"}" "${{ secrets.TEAMS_WEBHOOK_URL }}"
+          curl -H 'Content-Type: application/json' -d "{\"text\":\"E2E workflow ${STATUS} - run ${{ github.run_id }}\"}" "$TEAMS_WEBHOOK_URL"
