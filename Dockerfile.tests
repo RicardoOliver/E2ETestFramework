@@ -1,0 +1,12 @@
+FROM mcr.microsoft.com/dotnet/sdk:8.0
+
+WORKDIR /src
+COPY . .
+
+RUN dotnet restore E2ETestFramework.sln
+RUN dotnet build E2ETestFramework.sln -c Release --no-restore
+
+ENV TestSettings__Headless=true
+ENV TestSettings__CaptureScreenshotsOnFailure=true
+
+ENTRYPOINT ["dotnet", "test", "E2ETestFramework.Tests/E2ETestFramework.Tests.csproj", "-c", "Release", "--logger", "trx"]
