@@ -15,5 +15,6 @@ jobs:
             - checkout: self
             - script: |
                 echo "Deploying release $(Build.BuildId) to ${{ parameters.environmentName }}"
-                echo "Manual approvals for staging/prod are enforced via Azure DevOps Environment checks."
+                echo "Manual approval required: ${{ parameters.requireManualApproval }}"
+                echo "Approvals are enforced via Azure DevOps Environment checks/policies."
               displayName: 'Deploy application'

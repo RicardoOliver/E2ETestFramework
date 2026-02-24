@@ -14,6 +14,28 @@ parameters:
 
 steps:
   - task: PowerShell@2
+    displayName: 'Aggregate test results from TRX'
+    inputs:
+      targetType: inline
+      script: |
+        $trxFiles = Get-ChildItem -Path '$(Pipeline.Workspace)/all-artifacts' -Filter *.trx -Recurse -ErrorAction SilentlyContinue
+        $total = 0; $passed = 0; $failed = 0
+        foreach ($trx in $trxFiles) {
+          [xml]$xml = Get-Content $trx.FullName
+          $counters = $xml.TestRun.ResultSummary.Counters
+          if ($counters) {
+            $total += [int]$counters.total
+            $passed += [int]$counters.passed
+            $failed += [int]$counters.failed
+          }
+        }
+        if ($total -gt 0) { $success = [math]::Round(($passed / $total) * 100, 2) } else { $success = 0 }
+        Write-Host "##vso[task.setvariable variable=TotalTests]$total"
+        Write-Host "##vso[task.setvariable variable=PassedTests]$passed"
+        Write-Host "##vso[task.setvariable variable=FailedTests]$failed"
+        Write-Host "##vso[task.setvariable variable=SuccessRate]$success"
+
+  - task: PowerShell@2
     displayName: 'Send Adaptive Card to Teams'
     inputs:
       targetType: inline
@@ -23,6 +45,7 @@ steps:
         $branch = "$(Build.SourceBranchName)"
         $author = "$(Build.RequestedFor)"
         $duration = "$(Build.BuildNumber)"
+        $environment = if ("$(Build.SourceBranch)" -eq 'refs/heads/main') { 'prod' } elseif ("$(Build.SourceBranch)" -eq 'refs/heads/develop') { 'qa' } else { 'dev' }
         $adaptiveCard = @{
           type = 'message'
           attachments = @(@{
@@ -38,7 +61,11 @@ steps:
                   @{ title='Autor'; value=$author },
                   @{ title='Branch'; value=$branch },
                   @{ title='Build'; value='$(Build.BuildId)' },
-                  @{ title='Ambiente'; value='prod' },
+                  @{ title='Ambiente'; value=$environment },
+                  @{ title='Total'; value='$(TotalTests)' },
+                  @{ title='Aprovados'; value='$(PassedTests)' },
+                  @{ title='Falhos'; value='$(FailedTests)' },
+                  @{ title='Taxa sucesso'; value='$(SuccessRate)%' },
                   @{ title='Execução'; value=$duration }
                 )}
               )
@@ -57,11 +84,12 @@ steps:
       targetType: inline
       script: |
         $subject = "[E2E Pipeline] Build $(Build.BuildId) - $(Agent.JobStatus)"
+        $environment = if ("$(Build.SourceBranch)" -eq 'refs/heads/main') { 'prod' } elseif ("$(Build.SourceBranch)" -eq 'refs/heads/develop') { 'qa' } else { 'dev' }
         $body = @"
         Status: $(Agent.JobStatus)
-        Testes aprovados/falhos: consultar TestResults no build.
+        Testes totais: $(TotalTests) | Aprovados: $(PassedTests) | Falhos: $(FailedTests) | Taxa de sucesso: $(SuccessRate)%
         Evidências: $(System.TeamFoundationCollectionUri)$(System.TeamProject)/_build/results?buildId=$(Build.BuildId)
         Autor: $(Build.RequestedFor)
-        Ambiente impactado: prod
+        Ambiente impactado: $environment
         "@
         Send-MailMessage -SmtpServer '${{ parameters.smtpHost }}' -Port ${{ parameters.smtpPort }} -UseSsl -Credential (New-Object PSCredential('${{ parameters.smtpUser }}',(ConvertTo-SecureString '${{ parameters.smtpPassword }}' -AsPlainText -Force))) -From '${{ parameters.smtpUser }}' -To '${{ parameters.smtpTo }}' -Subject $subject -Body $body

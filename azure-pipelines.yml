@@ -369,6 +369,11 @@ stages:
         vmImage: ubuntu-latest
       steps:
         - checkout: self
+        - task: DownloadPipelineArtifact@2
+          displayName: 'Download evidence artifacts'
+          inputs:
+            buildType: current
+            targetPath: '$(Pipeline.Workspace)/all-artifacts'
         - task: AzureKeyVault@2
           inputs:
             azureSubscription: 'sc-azure-subscription-enterprise'
