@@ -1,73 +1,67 @@
-# Template para notificações
 parameters:
-- name: webhookUrl
-  type: string
-  default: ''
-- name: channel
-  type: string
-  default: 'general'
-- name: notificationType
-  type: string
-  default: 'teams' # teams, slack, email
+  - name: teamsWebhook
+    type: string
+  - name: smtpHost
+    type: string
+  - name: smtpPort
+    type: string
+  - name: smtpUser
+    type: string
+  - name: smtpPassword
+    type: string
+  - name: smtpTo
+    type: string
 
 steps:
-- task: PowerShell@2
-  displayName: '📢 Send ${{ parameters.notificationType }} Notification'
-  inputs:
-    targetType: 'inline'
-    script: |
-      $status = "$(Agent.JobStatus)"
-      $environment = "$(targetEnvironment)"
-      $buildVersion = "$(buildVersion)"
-      $buildUrl = "$(System.TeamFoundationCollectionUri)$(System.TeamProject)/_build/results?buildId=$(Build.BuildId)"
-      $sourceBranch = "$(Build.SourceBranch)".Replace("refs/heads/", "")
-      
-      $color = if ($status -eq "Succeeded") { "good" } else { "danger" }
-      $emoji = if ($status -eq "Succeeded") { "✅" } else { "❌" }
-      
-      if ("${{ parameters.notificationType }}" -eq "teams") {
-        # Microsoft Teams notification
-        $teamsMessage = @{
-          "@type" = "MessageCard"
-          "@context" = "http://schema.org/extensions"
-          "themeColor" = $color
-          "summary" = "Build $status"
-          "sections" = @(
-            @{
-              "activityTitle" = "$emoji E2E Test Framework - Build $status"
-              "activitySubtitle" = "Environment: $environment | Version: $buildVersion"
-              "facts" = @(
-                @{ "name" = "Environment"; "value" = $environment }
-                @{ "name" = "Version"; "value" = $buildVersion }
-                @{ "name" = "Branch"; "value" = $sourceBranch }
-                @{ "name" = "Status"; "value" = $status }
+  - task: PowerShell@2
+    displayName: 'Send Adaptive Card to Teams'
+    inputs:
+      targetType: inline
+      script: |
+        $buildUrl = "$(System.TeamFoundationCollectionUri)$(System.TeamProject)/_build/results?buildId=$(Build.BuildId)"
+        $status = "$(Agent.JobStatus)"
+        $branch = "$(Build.SourceBranchName)"
+        $author = "$(Build.RequestedFor)"
+        $duration = "$(Build.BuildNumber)"
+        $adaptiveCard = @{
+          type = 'message'
+          attachments = @(@{
+            contentType = 'application/vnd.microsoft.card.adaptive'
+            content = @{
+              '$schema' = 'http://adaptivecards.io/schemas/adaptive-card.json'
+              type = 'AdaptiveCard'
+              version = '1.4'
+              body = @(
+                @{ type = 'TextBlock'; size='Large'; weight='Bolder'; text = "Pipeline $status" },
+                @{ type = 'FactSet'; facts = @(
+                  @{ title='Status'; value=$status },
+                  @{ title='Autor'; value=$author },
+                  @{ title='Branch'; value=$branch },
+                  @{ title='Build'; value='$(Build.BuildId)' },
+                  @{ title='Ambiente'; value='prod' },
+                  @{ title='Execução'; value=$duration }
+                )}
               )
-              "markdown" = $true
-            }
-          )
-          "potentialAction" = @(
-            @{
-              "@type" = "OpenUri"
-              "name" = "View Build"
-              "targets" = @(
-                @{ "os" = "default"; "uri" = $buildUrl }
+              actions = @(
+                @{ type='Action.OpenUrl'; title='Abrir evidências'; url=$buildUrl }
               )
             }
-          )
+          })
         }
-        
-        $json = $teamsMessage | ConvertTo-Json -Depth 10
-        
-        if ("${{ parameters.webhookUrl }}" -ne "") {
-          try {
-            Invoke-RestMethod -Uri "${{ parameters.webhookUrl }}" -Method Post -Body $json -ContentType "application/json"
-            Write-Host "✅ Teams notification sent successfully"
-          } catch {
-            Write-Host "❌ Failed to send Teams notification: $($_.Exception.Message)"
-          }
-        } else {
-          Write-Host "⚠️ Teams webhook URL not configured"
-        }
-      }
-      
-      Write-Host "📢 Notification prepared for ${{ parameters.notificationType }}"
+        $body = $adaptiveCard | ConvertTo-Json -Depth 20
+        Invoke-RestMethod -Method Post -ContentType 'application/json' -Uri '${{ parameters.teamsWebhook }}' -Body $body
+
+  - task: PowerShell@2
+    displayName: 'Send SMTP email summary'
+    inputs:
+      targetType: inline
+      script: |
+        $subject = "[E2E Pipeline] Build $(Build.BuildId) - $(Agent.JobStatus)"
+        $body = @"
+        Status: $(Agent.JobStatus)
+        Testes aprovados/falhos: consultar TestResults no build.
+        Evidências: $(System.TeamFoundationCollectionUri)$(System.TeamProject)/_build/results?buildId=$(Build.BuildId)
+        Autor: $(Build.RequestedFor)
+        Ambiente impactado: prod
+        "@
+        Send-MailMessage -SmtpServer '${{ parameters.smtpHost }}' -Port ${{ parameters.smtpPort }} -UseSsl -Credential (New-Object PSCredential('${{ parameters.smtpUser }}',(ConvertTo-SecureString '${{ parameters.smtpPassword }}' -AsPlainText -Force))) -From '${{ parameters.smtpUser }}' -To '${{ parameters.smtpTo }}' -Subject $subject -Body $body
