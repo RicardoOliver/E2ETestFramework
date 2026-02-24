@@ -1,0 +1,197 @@
+name: Enterprise E2E CI/CD
+
+on:
+  push:
+    branches: [ main, develop, 'feature/**' ]
+  pull_request:
+    branches: [ main, develop ]
+  workflow_dispatch:
+
+env:
+  DOTNET_VERSION: '8.0.x'
+  BUILD_CONFIGURATION: Release
+  COVERAGE_THRESHOLD: 80
+
+jobs:
+  validation:
+    name: Validation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validate branch strategy
+        shell: bash
+        run: |
+          BRANCH="${GITHUB_REF}"
+          if [[ "$BRANCH" != "refs/heads/main" && "$BRANCH" != "refs/heads/develop" && ! "$BRANCH" =~ ^refs/heads/feature/ ]]; then
+            echo "Branch $BRANCH not allowed"
+            exit 1
+          fi
+
+      - name: Validate semantic version
+        shell: bash
+        run: |
+          VERSION=$(sed -n 's:.*<Version>\(.*\)</Version>.*:\1:p' Directory.Build.props | head -n1)
+          [[ -n "$VERSION" ]] || (echo "Version not found" && exit 1)
+          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.-]+)?$ ]] || (echo "Invalid semver: $VERSION" && exit 1)
+
+  build:
+    name: Build
+    needs: validation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+      - name: Cache NuGet
+        uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: nuget-${{ runner.os }}-${{ hashFiles('**/*.csproj', 'global.json', 'nuget.config') }}
+          restore-keys: nuget-${{ runner.os }}-
+      - name: Restore
+        run: dotnet restore E2ETestFramework.sln
+      - name: Build
+        run: dotnet build E2ETestFramework.sln -c $BUILD_CONFIGURATION --no-restore
+      - name: Publish binaries
+        run: dotnet publish E2ETestFramework.Tests/E2ETestFramework.Tests.csproj -c $BUILD_CONFIGURATION --no-build -o artifacts/drop/tests
+      - name: Upload drop
+        uses: actions/upload-artifact@v4
+        with:
+          name: drop
+          path: artifacts/drop
+
+  code_quality:
+    name: Code Quality (Sonar + Coverage)
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+      - name: Test + coverage
+        run: |
+          dotnet test E2ETestFramework.Tests/E2ETestFramework.Tests.csproj -c $BUILD_CONFIGURATION \
+            --logger trx --results-directory artifacts/quality \
+            /p:CollectCoverage=true /p:CoverletOutput=artifacts/quality/coverage/ /p:CoverletOutputFormat="opencover,cobertura"
+      - name: Enforce coverage threshold
+        shell: bash
+        run: |
+          FILE=$(find artifacts/quality -name 'coverage.cobertura.xml' | head -n1)
+          [[ -n "$FILE" ]] || (echo "coverage file not found" && exit 1)
+          RATE=$(python -c "import xml.etree.ElementTree as ET; import os; f=os.environ['FILE']; root=ET.parse(f).getroot(); print(round(float(root.attrib['line-rate'])*100,2))")
+          echo "Coverage: $RATE%"
+          awk -v r="$RATE" -v t="$COVERAGE_THRESHOLD" 'BEGIN { if (r < t) exit 1 }'
+      - name: SonarQube Scan
+        if: ${{ secrets.SONAR_TOKEN != '' && secrets.SONAR_HOST_URL != '' }}
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+        run: |
+          dotnet tool update --global dotnet-sonarscanner
+          export PATH="$PATH:$HOME/.dotnet/tools"
+          dotnet sonarscanner begin /k:"E2ETestFramework" /d:sonar.host.url="$SONAR_HOST_URL" /d:sonar.token="$SONAR_TOKEN" /d:sonar.cs.opencover.reportsPaths="artifacts/quality/**/coverage.opencover.xml"
+          dotnet build E2ETestFramework.sln -c $BUILD_CONFIGURATION
+          dotnet sonarscanner end /d:sonar.token="$SONAR_TOKEN"
+
+  security:
+    name: Security
+    needs: code_quality
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+      - name: .NET vulnerabilities
+        run: |
+          dotnet restore E2ETestFramework.sln
+          dotnet list E2ETestFramework.sln package --vulnerable --include-transitive > artifacts-deps.txt
+          if grep -q 'has the following vulnerable packages' artifacts-deps.txt; then
+            cat artifacts-deps.txt
+            exit 1
+          fi
+      - name: Secrets scan (Gitleaks)
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  test_execution:
+    name: E2E ${{ matrix.suite }} / ${{ matrix.browser }}
+    needs: security
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: [smoke, regression, security, accessibility]
+        browser: [chrome, firefox, edge]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+      - name: Prepare evidence folders
+        run: mkdir -p evidence/{Reports,Screenshots,Logs,TestResults,Metrics}
+      - name: Run suite
+        env:
+          TestSettings__Browser: ${{ matrix.browser }}
+          TestSettings__Headless: 'true'
+          TestSettings__CaptureScreenshotsOnFailure: 'true'
+        run: |
+          dotnet test E2ETestFramework.Tests/E2ETestFramework.Tests.csproj -c $BUILD_CONFIGURATION \
+            --logger trx --logger "console;verbosity=detailed" \
+            --results-directory evidence/TestResults/${{ matrix.suite }}-${{ matrix.browser }} \
+            --filter "TestCategory=${{ matrix.suite }}"
+      - name: Export metrics JSON
+        shell: bash
+        run: |
+          COUNT=$(find evidence/TestResults/${{ matrix.suite }}-${{ matrix.browser }} -name '*.trx' | wc -l | tr -d ' ')
+          cat > evidence/Metrics/${{ matrix.suite }}-${{ matrix.browser }}.json <<JSON
+          {"suite":"${{ matrix.suite }}","browser":"${{ matrix.browser }}","workflow":"${{ github.run_id }}","trxFiles":$COUNT}
+          JSON
+      - name: Upload evidence
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: evidence-${{ matrix.suite }}-${{ matrix.browser }}
+          path: evidence
+
+  containerize:
+    name: Containerize
+    needs: test_execution
+    runs-on: ubuntu-latest
+    if: ${{ github.event_name != 'pull_request' }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Login registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ secrets.REGISTRY_URL }}
+          username: ${{ secrets.REGISTRY_USERNAME }}
+          password: ${{ secrets.REGISTRY_PASSWORD }}
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.tests
+          push: true
+          tags: |
+            ${{ secrets.REGISTRY_URL }}/e2e-test-framework:${{ github.run_number }}-${{ github.sha }}
+            ${{ secrets.REGISTRY_URL }}/e2e-test-framework:latest
+
+  notify:
+    name: Notifications
+    needs: [test_execution, containerize]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Teams webhook notification
+        if: ${{ secrets.TEAMS_WEBHOOK_URL != '' }}
+        shell: bash
+        run: |
+          STATUS="${{ job.status }}"
+          curl -H 'Content-Type: application/json' -d "{\"text\":\"E2E workflow ${STATUS} - run ${{ github.run_id }}\"}" "${{ secrets.TEAMS_WEBHOOK_URL }}"
